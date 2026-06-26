@@ -100,7 +100,10 @@ const TICK_MS = 1000
 const RESET_PARSE_RE = /Your limit will reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/
 const RETRY_AFTER_RE = /reset after (\d+h)?(\d+m)?(\d+s)?/i
 const SGT_OFFSET_MS = 8 * 60 * 60 * 1000
-const FETCH_TIMEOUT_MS = 10_000
+const FETCH_TIMEOUT_MS = 20_000
+// Keep showing the last known quota (marked stale) through transient fetch
+// failures; fall back to the heuristic view once the data is older than this.
+const STALE_MAX_MS = 10 * 60 * 1000
 
 const ACCOUNT_JSON_PATHS = [
   `${process.env.HOME || ""}/.config/opencode/account.json`,
@@ -479,6 +482,8 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
 
   const [quotaTrigger, setQuotaTrigger] = createSignal(0)
   const [quotaData, setQuotaData] = createSignal<QuotaData | null>(null)
+  const [quotaStale, setQuotaStale] = createSignal(false)
+  const [lastSuccessAt, setLastSuccessAt] = createSignal(0)
   const [hasFetched, setHasFetched] = createSignal(false)
 
   createEffect(() => {
@@ -490,10 +495,24 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
       return
     }
     fetchQuota(key).then(data => {
-      setQuotaData(data)
+      if (data) {
+        setQuotaData(data)
+        setQuotaStale(false)
+        setLastSuccessAt(Date.now())
+      } else if (quotaData()) {
+        // Transient failure (non-2xx / unexpected payload): keep the last known
+        // quota and mark it stale instead of dropping to the heuristic view.
+        setQuotaStale(true)
+      } else {
+        setQuotaData(null)
+      }
       setHasFetched(true)
     }).catch(() => {
-      setQuotaData(null)
+      if (quotaData()) {
+        setQuotaStale(true)
+      } else {
+        setQuotaData(null)
+      }
       setHasFetched(true)
     })
   })
@@ -568,7 +587,15 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
   })
 
   const [now, setNow] = createSignal(Date.now())
-  const tickId = setInterval(() => setNow(Date.now()), TICK_MS)
+  const tickId = setInterval(() => {
+    const current = Date.now()
+    setNow(current)
+    const lastOk = lastSuccessAt()
+    if (lastOk && current - lastOk > STALE_MAX_MS && quotaData()) {
+      setQuotaData(null)
+      setQuotaStale(false)
+    }
+  }, TICK_MS)
   onCleanup(() => clearInterval(tickId))
 
   const [displayState, setDisplayState] = createSignal(computeDisplay(
@@ -624,6 +651,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
                 <text fg={s.isPeak ? theme().warning : theme().success}>
                   {s.isPeak ? " ⚡Peak (3x)" : " 🌙Off-Peak"}
                 </text>
+              </Show>
+              <Show when={quotaStale()}>
+                <text fg={theme().warning}>~stale</text>
               </Show>
             </box>
 
