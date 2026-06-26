@@ -105,9 +105,15 @@ const FETCH_TIMEOUT_MS = 20_000
 // failures; fall back to the heuristic view once the data is older than this.
 const STALE_MAX_MS = 10 * 60 * 1000
 
-const ACCOUNT_JSON_PATHS = [
-  `${process.env.HOME || ""}/.config/opencode/account.json`,
-  `${process.env.HOME || ""}/.local/share/opencode/account.json`,
+const HOME = process.env.HOME || ""
+const XDG_DATA = process.env.XDG_DATA_HOME || `${HOME}/.local/share`
+const XDG_CONFIG = process.env.XDG_CONFIG_HOME || `${HOME}/.config`
+
+const CREDENTIAL_FILE_PATHS = [
+  `${XDG_DATA}/opencode/auth.json`,
+  `${XDG_CONFIG}/opencode/auth.json`,
+  `${XDG_CONFIG}/opencode/account.json`,
+  `${XDG_DATA}/opencode/account.json`,
 ]
 
 // --- Pure helpers -----------------------------------------------------------
@@ -214,19 +220,32 @@ interface AccountEntry {
   credential?: { key: string }
 }
 
+interface AuthEntry {
+  type?: string
+  key?: string
+}
+
 function findKeyFromFiles(): string | null {
-  for (const filePath of ACCOUNT_JSON_PATHS) {
+  for (const filePath of CREDENTIAL_FILE_PATHS) {
     try {
       if (!existsSync(filePath)) continue
       const raw = readFileSync(filePath, "utf-8")
       const data = JSON.parse(raw)
-      const key = keyFromAccountFile(data) ?? keyFromAccountArray(data)
+      const key = keyFromAuthFile(data) ?? keyFromAccountFile(data) ?? keyFromAccountArray(data)
       if (key) return key
     } catch (err) {
-      console.error("[glm-reset] Failed to read account file:", err)
+      console.error("[glm-reset] Failed to read credential file:", err)
     }
   }
   return null
+}
+
+function keyFromAuthFile(data: unknown): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null
+  const entry = (data as Record<string, AuthEntry>)[ZAI_PROVIDER_ID]
+  if (!entry || typeof entry !== "object") return null
+  if (entry.type && entry.type !== "api") return null
+  return typeof entry.key === "string" && entry.key ? entry.key : null
 }
 
 function keyFromAccountFile(data: unknown): string | null {

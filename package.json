@@ -1,6 +1,6 @@
 {
   "name": "@farrukh2002/opencode-glm-reset",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "OpenCode TUI sidebar plugin for GLM rate limit reset countdown",
   "type": "module",
   "exports": {

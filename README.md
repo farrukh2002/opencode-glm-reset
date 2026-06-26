@@ -40,12 +40,13 @@ Add to your `~/.config/opencode/tui.json`:
 }
 ```
 
-Requires the `zai-coding-plan` provider configured in your opencode `account.json`.
+Requires the `zai-coding-plan` provider configured in your opencode `auth.json`.
 
 ## How it works
 
 1. Reads the API key from the `zai-coding-plan` provider (falls back to
-   `~/.config/opencode/account.json` / `~/.local/share/opencode/account.json`).
+   `~/.local/share/opencode/auth.json`, then `~/.config/opencode/auth.json`
+   and the older `account.json` locations).
 2. Polls `https://api.z.ai/api/monitor/usage/quota/limit` every 60s (5min
    when the 5H quota is exhausted).
 3. Renders bars + countdowns in the sidebar; expands for absolute counts.
