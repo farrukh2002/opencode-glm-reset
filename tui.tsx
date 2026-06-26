@@ -414,9 +414,13 @@ function computeDisplay(
   cy: number,
 ): DisplayState {
   const isPeak = isPeakHour(t)
-  const hasTokenQuota = apiQuota && apiQuota.tokenNextResetEpoch > 0
-  if (hasTokenQuota) {
-    const tokenRemaining = apiQuota.tokenNextResetEpoch - t
+  const hasApiData =
+    apiQuota !== null &&
+    (apiQuota.tokenNextResetEpoch > 0 ||
+      apiQuota.timeLimit !== null ||
+      apiQuota.weeklyLimit !== null)
+  if (hasApiData) {
+    const hasTokenReset = apiQuota.tokenNextResetEpoch > 0
     return {
       source: "api",
       level: apiQuota.level,
@@ -428,7 +432,7 @@ function computeDisplay(
         // absolute is null when the API returns percentage only (common on Pro);
         // the limit still exists and renders percentage-only.
         absolute: apiQuota.tokenAbsolute,
-        countdown: formatRemaining(tokenRemaining),
+        countdown: hasTokenReset ? formatRemaining(apiQuota.tokenNextResetEpoch - t) : "—",
       },
       weekly: apiQuota.weeklyLimit
         ? {
