@@ -14,7 +14,8 @@ interface TokenLimit {
   number: number
   percentage: number
   nextResetTime: number
-  // Real absolute token counts. Present on Max/Pro plans, OMITTED on Lite.
+  // Real absolute token counts. Optional: the API omits usage/currentValue on
+  // some plans (observed even on Pro), returning percentage only.
   usage?: number        // total token limit for this window
   currentValue?: number // tokens consumed
   remaining?: number    // tokens remaining
@@ -46,8 +47,8 @@ interface QuotaApiResponse {
   }
 }
 
-// Optional absolute token counts, present ONLY when the API returns them
-// (Max/Pro plans). Lite plans omit usage/currentValue, so absolute is null.
+// Optional absolute token counts, present ONLY when the API returns them.
+// Many plans (including Pro) return percentage only, so absolute is often null.
 interface AbsoluteQuota {
   usedPct: number
   remainingPct: number
@@ -62,7 +63,12 @@ interface QuotaData {
   tokenRemainingPct: number
   tokenNextResetEpoch: number
   tokenAbsolute: AbsoluteQuota | null
-  weeklyLimit: AbsoluteQuota | null
+  weeklyLimit: {
+    usedPct: number
+    remainingPct: number
+    nextResetEpoch: number
+    absolute: AbsoluteQuota | null
+  } | null
   timeLimit: {
     usedPct: number
     remainingPct: number
@@ -94,7 +100,10 @@ const TICK_MS = 1000
 const RESET_PARSE_RE = /Your limit will reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/
 const RETRY_AFTER_RE = /reset after (\d+h)?(\d+m)?(\d+s)?/i
 const SGT_OFFSET_MS = 8 * 60 * 60 * 1000
-const FETCH_TIMEOUT_MS = 10_000
+const FETCH_TIMEOUT_MS = 20_000
+// Keep showing the last known quota (marked stale) through transient fetch
+// failures; fall back to the heuristic view once the data is older than this.
+const STALE_MAX_MS = 10 * 60 * 1000
 
 const ACCOUNT_JSON_PATHS = [
   `${process.env.HOME || ""}/.config/opencode/account.json`,
@@ -287,7 +296,8 @@ async function fetchQuota(apiKey: string): Promise<QuotaData | null> {
     const timeLimit = data.limits.find((l): l is TimeLimit => l.type === "TIME_LIMIT")
 
     // Build an AbsoluteQuota ONLY when the API returns real counts (usage/currentValue).
-    // Lite plans omit these, so absolute is null and the UI shows percentage-only.
+    // Many plans omit these (percentage only), so absolute is often null; the limit
+    // itself still exists and is rendered percentage-only.
     function absoluteFromToken(l: TokenLimit, usedPct: number): AbsoluteQuota | null {
       const total = safeNumber(l.usage, 0)
       if (!l.usage || total <= 0) return null
@@ -309,9 +319,15 @@ async function fetchQuota(apiKey: string): Promise<QuotaData | null> {
       tokenNextResetEpoch = safeNumber(tokenLimit.nextResetTime, 0)
       tokenAbsolute = absoluteFromToken(tokenLimit, tokenUsedPct)
     }
-    let weeklyQuota: AbsoluteQuota | null = null
+    let weeklyQuota: QuotaData["weeklyLimit"] = null
     if (weeklyLimit) {
-      weeklyQuota = absoluteFromToken(weeklyLimit, clampPct(safeNumber(weeklyLimit.percentage, 0)))
+      const weeklyUsedPct = clampPct(safeNumber(weeklyLimit.percentage, 0))
+      weeklyQuota = {
+        usedPct: weeklyUsedPct,
+        remainingPct: clampPct(100 - weeklyUsedPct),
+        nextResetEpoch: safeNumber(weeklyLimit.nextResetTime, 0),
+        absolute: absoluteFromToken(weeklyLimit, weeklyUsedPct),
+      }
     }
     let timeQuota: QuotaData["timeLimit"] = null
     if (timeLimit) {
@@ -390,7 +406,8 @@ function computeDisplay(
         usedPct: apiQuota.tokenUsedPct,
         remainingPct: apiQuota.tokenRemainingPct,
         nextResetEpoch: apiQuota.tokenNextResetEpoch,
-        // absolute is null on Lite (API omits usage); real counts on Max/Pro
+        // absolute is null when the API returns percentage only (common on Pro);
+        // the limit still exists and renders percentage-only.
         absolute: apiQuota.tokenAbsolute,
         countdown: formatRemaining(tokenRemaining),
       },
@@ -399,7 +416,7 @@ function computeDisplay(
           usedPct: apiQuota.weeklyLimit.usedPct,
           remainingPct: apiQuota.weeklyLimit.remainingPct,
           nextResetEpoch: apiQuota.weeklyLimit.nextResetEpoch,
-          absolute: apiQuota.weeklyLimit,
+          absolute: apiQuota.weeklyLimit.absolute,
           countdown: formatRemaining(apiQuota.weeklyLimit.nextResetEpoch - t),
         }
         : null,
@@ -465,6 +482,8 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
 
   const [quotaTrigger, setQuotaTrigger] = createSignal(0)
   const [quotaData, setQuotaData] = createSignal<QuotaData | null>(null)
+  const [quotaStale, setQuotaStale] = createSignal(false)
+  const [lastSuccessAt, setLastSuccessAt] = createSignal(0)
   const [hasFetched, setHasFetched] = createSignal(false)
 
   createEffect(() => {
@@ -476,10 +495,24 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
       return
     }
     fetchQuota(key).then(data => {
-      setQuotaData(data)
+      if (data) {
+        setQuotaData(data)
+        setQuotaStale(false)
+        setLastSuccessAt(Date.now())
+      } else if (quotaData()) {
+        // Transient failure (non-2xx / unexpected payload): keep the last known
+        // quota and mark it stale instead of dropping to the heuristic view.
+        setQuotaStale(true)
+      } else {
+        setQuotaData(null)
+      }
       setHasFetched(true)
     }).catch(() => {
-      setQuotaData(null)
+      if (quotaData()) {
+        setQuotaStale(true)
+      } else {
+        setQuotaData(null)
+      }
       setHasFetched(true)
     })
   })
@@ -554,7 +587,15 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
   })
 
   const [now, setNow] = createSignal(Date.now())
-  const tickId = setInterval(() => setNow(Date.now()), TICK_MS)
+  const tickId = setInterval(() => {
+    const current = Date.now()
+    setNow(current)
+    const lastOk = lastSuccessAt()
+    if (lastOk && current - lastOk > STALE_MAX_MS && quotaData()) {
+      setQuotaData(null)
+      setQuotaStale(false)
+    }
+  }, TICK_MS)
   onCleanup(() => clearInterval(tickId))
 
   const [displayState, setDisplayState] = createSignal(computeDisplay(
@@ -610,6 +651,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
                 <text fg={s.isPeak ? theme().warning : theme().success}>
                   {s.isPeak ? " ⚡Peak (3x)" : " 🌙Off-Peak"}
                 </text>
+              </Show>
+              <Show when={quotaStale()}>
+                <text fg={theme().warning}>~stale</text>
               </Show>
             </box>
 
