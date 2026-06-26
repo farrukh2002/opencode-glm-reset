@@ -14,7 +14,8 @@ interface TokenLimit {
   number: number
   percentage: number
   nextResetTime: number
-  // Real absolute token counts. Present on Max/Pro plans, OMITTED on Lite.
+  // Real absolute token counts. Optional: the API omits usage/currentValue on
+  // some plans (observed even on Pro), returning percentage only.
   usage?: number        // total token limit for this window
   currentValue?: number // tokens consumed
   remaining?: number    // tokens remaining
@@ -46,8 +47,8 @@ interface QuotaApiResponse {
   }
 }
 
-// Optional absolute token counts, present ONLY when the API returns them
-// (Max/Pro plans). Lite plans omit usage/currentValue, so absolute is null.
+// Optional absolute token counts, present ONLY when the API returns them.
+// Many plans (including Pro) return percentage only, so absolute is often null.
 interface AbsoluteQuota {
   usedPct: number
   remainingPct: number
@@ -62,7 +63,12 @@ interface QuotaData {
   tokenRemainingPct: number
   tokenNextResetEpoch: number
   tokenAbsolute: AbsoluteQuota | null
-  weeklyLimit: AbsoluteQuota | null
+  weeklyLimit: {
+    usedPct: number
+    remainingPct: number
+    nextResetEpoch: number
+    absolute: AbsoluteQuota | null
+  } | null
   timeLimit: {
     usedPct: number
     remainingPct: number
@@ -287,7 +293,8 @@ async function fetchQuota(apiKey: string): Promise<QuotaData | null> {
     const timeLimit = data.limits.find((l): l is TimeLimit => l.type === "TIME_LIMIT")
 
     // Build an AbsoluteQuota ONLY when the API returns real counts (usage/currentValue).
-    // Lite plans omit these, so absolute is null and the UI shows percentage-only.
+    // Many plans omit these (percentage only), so absolute is often null; the limit
+    // itself still exists and is rendered percentage-only.
     function absoluteFromToken(l: TokenLimit, usedPct: number): AbsoluteQuota | null {
       const total = safeNumber(l.usage, 0)
       if (!l.usage || total <= 0) return null
@@ -309,9 +316,15 @@ async function fetchQuota(apiKey: string): Promise<QuotaData | null> {
       tokenNextResetEpoch = safeNumber(tokenLimit.nextResetTime, 0)
       tokenAbsolute = absoluteFromToken(tokenLimit, tokenUsedPct)
     }
-    let weeklyQuota: AbsoluteQuota | null = null
+    let weeklyQuota: QuotaData["weeklyLimit"] = null
     if (weeklyLimit) {
-      weeklyQuota = absoluteFromToken(weeklyLimit, clampPct(safeNumber(weeklyLimit.percentage, 0)))
+      const weeklyUsedPct = clampPct(safeNumber(weeklyLimit.percentage, 0))
+      weeklyQuota = {
+        usedPct: weeklyUsedPct,
+        remainingPct: clampPct(100 - weeklyUsedPct),
+        nextResetEpoch: safeNumber(weeklyLimit.nextResetTime, 0),
+        absolute: absoluteFromToken(weeklyLimit, weeklyUsedPct),
+      }
     }
     let timeQuota: QuotaData["timeLimit"] = null
     if (timeLimit) {
@@ -390,7 +403,8 @@ function computeDisplay(
         usedPct: apiQuota.tokenUsedPct,
         remainingPct: apiQuota.tokenRemainingPct,
         nextResetEpoch: apiQuota.tokenNextResetEpoch,
-        // absolute is null on Lite (API omits usage); real counts on Max/Pro
+        // absolute is null when the API returns percentage only (common on Pro);
+        // the limit still exists and renders percentage-only.
         absolute: apiQuota.tokenAbsolute,
         countdown: formatRemaining(tokenRemaining),
       },
@@ -399,7 +413,7 @@ function computeDisplay(
           usedPct: apiQuota.weeklyLimit.usedPct,
           remainingPct: apiQuota.weeklyLimit.remainingPct,
           nextResetEpoch: apiQuota.weeklyLimit.nextResetEpoch,
-          absolute: apiQuota.weeklyLimit,
+          absolute: apiQuota.weeklyLimit.absolute,
           countdown: formatRemaining(apiQuota.weeklyLimit.nextResetEpoch - t),
         }
         : null,
